@@ -124,3 +124,15 @@ def test_run_ids_and_large_numbers_generalized():
     sig = extract_signature(ts("FAILED t.py::x - TimeoutError: run 123456789 did not complete"))
     assert "<NUM>" in sig.message_skeleton
     assert "123456789" not in sig.message_skeleton
+
+
+def test_failure_key_and_retrieval_text_separate_identity_from_query():
+    sig = extract_signature(ts("FAILED tests/a.py::TestX::test_one[param-3] - AssertionError: assert 1 == 2"))
+    assert sig.failure_key == "test:tests/a.py::TestX::test_one"
+    assert sig.retrieval_text == "AssertionError: assert 1 == 2"
+    assert "test_one" not in sig.retrieval_text
+
+
+def test_tail_fallback_has_no_failure_key():
+    sig = extract_signature(ts("Error: Process completed with exit code 1."))
+    assert sig.failure_key is None

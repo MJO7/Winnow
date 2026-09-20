@@ -39,8 +39,9 @@ def build_signatures(conn: psycopg.Connection, repo_id: int) -> dict[str, int]:
                 """
                 INSERT INTO failure_signatures (
                     job_id, signature_source, exception_type, message_skeleton,
-                    top_frames, test_nodeids, signature_text, signature_hash
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    top_frames, test_nodeids, signature_text, signature_hash,
+                    retrieval_text, failure_key
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     job_id,
@@ -51,6 +52,8 @@ def build_signatures(conn: psycopg.Connection, repo_id: int) -> dict[str, int]:
                     Json(sig.test_nodeids),
                     sig.signature_text,
                     sig.signature_hash,
+                    sig.retrieval_text,
+                    sig.failure_key,
                 ),
             )
     conn.commit()

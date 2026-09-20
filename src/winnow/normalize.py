@@ -79,6 +79,27 @@ class FailureSignature:
     def signature_hash(self) -> str:
         return hashlib.sha256(self.signature_text.encode("utf-8")).hexdigest()[:32]
 
+    @property
+    def retrieval_text(self) -> str:
+        """What retrievers see: exception type + message only. Test ids and
+        frames are held out as the relevance key, so retrieval has to work
+        from the failure's description rather than its name."""
+        prefix = f"{self.exception_type}: " if self.exception_type else ""
+        return f"{prefix}{self.message_skeleton}"
+
+    @property
+    def failure_key(self) -> str | None:
+        """Identity used as retrieval ground truth: 'the same test failed'
+        (pytest, parametrization stripped) or 'the same exception at the
+        same frame' (bare traceback). Tail-fallback signatures have no
+        defensible identity and are excluded from the query set."""
+        if self.signature_source == "pytest_failed_summary" and self.test_nodeids:
+            return "test:" + self.test_nodeids[0].split("[", 1)[0]
+        if self.signature_source == "traceback_block" and self.top_frames:
+            f = self.top_frames[0]
+            return f"exc:{self.exception_type}@{f.file}:{f.function}"
+        return None
+
 
 def _strip_lines(raw_log: str) -> list[str]:
     lines = raw_log.splitlines()
