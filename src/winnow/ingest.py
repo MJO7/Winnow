@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import logging
 from datetime import datetime, timezone
 
@@ -23,25 +24,39 @@ def discover_runs(
     owner: str,
     repo: str,
     repo_id: int,
-    target_count: int,
+    per_day: int,
+    days: int,
     events: tuple[str, ...] = ("push", "pull_request"),
+    end_date: dt.date | None = None,
 ) -> int:
-    """Pulls up to `target_count` recent workflow runs per event type and
-    upserts run metadata. Idempotent: re-running just refreshes rows via
-    ON CONFLICT, so ingest can be resumed after a rate-limit pause or a
-    crash without duplicating work.
+    """Samples up to `per_day` runs per event type for each of the last
+    `days` days, via the `created=YYYY-MM-DD` filter.
+
+    Day windows, not "the N most recent", for two reasons measured on the
+    first corpus: (1) GitHub's `event=` listing is not reliably ordered
+    for very high-volume repos -- pytorch's "newest" push run came back a
+    month stale while `created>=` returned that day's runs; (2) re-run
+    evidence needs elapsed time to exist, and 500 runs of a repo doing
+    9,000 push runs a day is a few hours, not a history.
+
+    Idempotent: re-running refreshes rows via ON CONFLICT.
     """
+    end_date = end_date or dt.datetime.now(dt.timezone.utc).date()
     inserted = 0
-    for event in events:
-        seen = 0
-        for run in client.list_workflow_runs(owner, repo, event=event):
-            _upsert_run(conn, repo_id, run)
-            inserted += 1
-            seen += 1
-            if seen >= target_count:
-                break
-        conn.commit()
-        logger.info("repo=%s/%s event=%s runs_ingested=%d", owner, repo, event, seen)
+    for offset in range(days):
+        day = end_date - dt.timedelta(days=offset)
+        for event in events:
+            seen = 0
+            for run in client.list_workflow_runs(owner, repo, event=event, created=day.isoformat()):
+                _upsert_run(conn, repo_id, run)
+                inserted += 1
+                seen += 1
+                if seen >= per_day:
+                    break
+            conn.commit()
+        if offset % 5 == 4:
+            logger.info("repo=%s/%s discovered through %s: %d runs so far", owner, repo, day, inserted)
+    logger.info("repo=%s/%s discovered %d runs across %d days", owner, repo, inserted, days)
     return inserted
 
 

@@ -12,6 +12,8 @@ from winnow.migrate import apply_migrations
 TEST_DB_NAME = "winnow_test"
 
 TABLES_IN_FK_ORDER = [
+    "llm_cache",
+    "signature_embeddings",
     "retry_config_findings",
     "external_flaky_signals",
     "exclusions",

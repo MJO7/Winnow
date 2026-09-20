@@ -9,13 +9,21 @@ failures actually take in CI output", and the narrower version is what
 actually gets built and measured.
 
 Precedence, most to least reliable:
-  1. pytest's "short test summary info" lines (FAILED/ERROR <nodeid> - ...)
+  1. pytest's "short test summary info" lines (FAILED/ERROR <nodeid> [- msg])
      -- compact, structured, and pytest emits exactly one per failing test.
-  2. A Python traceback block (Traceback (most recent call last): ... )
+  2. unittest / regrtest result headers (FAIL: test_x (mod.Class.test_x))
+     -- cpython's format; the traceback that follows supplies the message.
+  3. A Python traceback block (Traceback (most recent call last): ... )
      -- less structured, more free text, but still has a clear grammar.
-  3. Tail fallback -- last non-empty lines of the log. Catches process
-     kills, timeouts, "Process completed with exit code N" -- failures
-     that never produced a Python-level exception at all.
+  4. Error lines: GitHub's ##[error] annotations and compiler-style
+     "fatal error:" / "error:" lines, excluding the information-free
+     "Process completed with exit code N". Catches lint, build and
+     tooling failures that never raised a Python exception.
+  5. Tail fallback -- last non-empty lines of the log.
+
+Measured against the first log corpus (1,325 failed jobs): 1 and 3 alone
+left 52% of signatures on the tail fallback; 2 and 4 were added after
+reading what those logs actually contained (see docs/AI_USE.md).
 """
 from __future__ import annotations
 
@@ -26,7 +34,17 @@ from dataclasses import dataclass, field
 _TS_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z ")
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
-_PYTEST_SUMMARY_LINE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)\s+-\s+(.*)$")
+# "FAILED path::test - Message" or, with -r flags that omit it, just "FAILED path::test".
+# The "::" is required so unittest's "FAILED (failures=1)" trailer doesn't match.
+_PYTEST_SUMMARY_LINE = re.compile(r"^(?:FAILED|ERROR)\s+(\S*::\S+?)(?:\s+-\s+(.*))?$")
+_PYTEST_E_LINE = re.compile(r"^E\s{2,}(\S.*)$")
+# unittest / cpython regrtest: "FAIL: test_x (test.mod.Class.test_x)" / "ERROR: test_x (...)"
+_UNITTEST_HEADER = re.compile(r"^(?:FAIL|ERROR):\s+(\w+)\s+\(([\w.]+)\)")
+# GitHub's structured error channel and compiler-style errors; the generic
+# "Process completed with exit code N" carries no information and is skipped.
+_ERROR_LINE = re.compile(
+    r"(?:##\[error\]|\b(?:fatal error|error|ERROR|Error):\s+)(?!Process completed with exit code)(.+)$"
+)
 _TRACEBACK_START = re.compile(r"^Traceback \(most recent call last\):\s*$")
 _TRACEBACK_FRAME = re.compile(r'^\s*File "([^"]+)", line \d+, in (\S+)\s*$')
 _EXCEPTION_LINE = re.compile(r"^([A-Za-z_][\w.]*(?:Error|Exception|Warning|Interrupt)):\s?(.*)$")
@@ -64,7 +82,7 @@ class Frame:
 
 @dataclass
 class FailureSignature:
-    signature_source: str  # pytest_failed_summary | traceback_block | tail_fallback
+    signature_source: str  # pytest_failed_summary | unittest_result | traceback_block | error_lines | tail_fallback
     exception_type: str | None
     message_skeleton: str
     top_frames: list[Frame] = field(default_factory=list)
@@ -93,7 +111,7 @@ class FailureSignature:
         (pytest, parametrization stripped) or 'the same exception at the
         same frame' (bare traceback). Tail-fallback signatures have no
         defensible identity and are excluded from the query set."""
-        if self.signature_source == "pytest_failed_summary" and self.test_nodeids:
+        if self.signature_source in ("pytest_failed_summary", "unittest_result") and self.test_nodeids:
             return "test:" + self.test_nodeids[0].split("[", 1)[0]
         if self.signature_source == "traceback_block" and self.top_frames:
             f = self.top_frames[0]
@@ -129,6 +147,11 @@ def _shorten_path(path: str) -> str:
     return "/".join(parts[-2:]) if len(parts) >= 2 else path
 
 
+def _split_exception(text: str) -> tuple[str | None, str]:
+    m = _EXCEPTION_LINE.match(text)
+    return (m.group(1), m.group(2)) if m else (None, text)
+
+
 def _extract_pytest_summary(lines: list[str]) -> FailureSignature | None:
     node_ids: list[str] = []
     first_exc_type: str | None = None
@@ -140,15 +163,21 @@ def _extract_pytest_summary(lines: list[str]) -> FailureSignature | None:
             continue
         nodeid, rest = m.group(1), m.group(2)
         node_ids.append(nodeid)
-        if first_message is None:
-            exc_m = _EXCEPTION_LINE.match(rest)
-            if exc_m:
-                first_exc_type, first_message = exc_m.group(1), exc_m.group(2)
-            else:
-                first_exc_type, first_message = None, rest
+        if first_message is None and rest:
+            first_exc_type, first_message = _split_exception(rest)
 
     if not node_ids:
         return None
+
+    if first_message is None:
+        # Summary line had no "- message" (pytest -rf without -ra): the first
+        # "E   ..." assertion line in the FAILURES section belongs to the first
+        # failing test, which is also the first summary line.
+        for line in lines:
+            em = _PYTEST_E_LINE.match(line)
+            if em:
+                first_exc_type, first_message = _split_exception(em.group(1))
+                break
 
     return FailureSignature(
         signature_source="pytest_failed_summary",
@@ -156,6 +185,68 @@ def _extract_pytest_summary(lines: list[str]) -> FailureSignature | None:
         message_skeleton=_normalize_text(first_message or ""),
         top_frames=[Frame(file=_shorten_path(node_ids[0].split("::")[0]), function=node_ids[0].split("::")[-1])],
         test_nodeids=node_ids,
+    )
+
+
+def _extract_unittest(lines: list[str]) -> FailureSignature | None:
+    node_ids: list[str] = []
+    first_idx: int | None = None
+    for i, line in enumerate(lines):
+        m = _UNITTEST_HEADER.match(line)
+        if not m:
+            continue
+        name, dotted = m.group(1), m.group(2)
+        # "test.mod.Class.test_x" -> "test.mod.Class::test_x"
+        cls = dotted[: -len(name) - 1] if dotted.endswith("." + name) else dotted
+        node_ids.append(f"{cls}::{name}")
+        if first_idx is None:
+            first_idx = i
+    if not node_ids:
+        return None
+
+    exc_type, message = None, ""
+    frames: list[Frame] = []
+    for line in lines[first_idx + 1 : first_idx + 120]:
+        fm = _TRACEBACK_FRAME.match(line)
+        if fm:
+            frames.append(Frame(file=_shorten_path(fm.group(1)), function=fm.group(2)))
+            continue
+        em = _EXCEPTION_LINE.match(line)
+        if em:
+            exc_type, message = em.group(1), em.group(2)
+            break
+        if _UNITTEST_HEADER.match(line):
+            break
+    return FailureSignature(
+        signature_source="unittest_result",
+        exception_type=exc_type,
+        message_skeleton=_normalize_text(message),
+        top_frames=list(reversed(frames))[:3] or [Frame(file=node_ids[0].split("::")[0], function=node_ids[0].split("::")[-1])],
+        test_nodeids=node_ids,
+    )
+
+
+def _extract_error_lines(lines: list[str]) -> FailureSignature | None:
+    hits: list[str] = []
+    for line in lines:
+        m = _ERROR_LINE.search(line)
+        if not m:
+            continue
+        text = m.group(1).strip()
+        if text and text not in hits:
+            hits.append(text)
+    if not hits:
+        return None
+    # Last few distinct errors: chronologically closest to the point the
+    # job died, and de-duplicated so a repeated compiler error counts once.
+    tail = hits[-3:]
+    exc_type, message = _split_exception(tail[0])
+    return FailureSignature(
+        signature_source="error_lines",
+        exception_type=exc_type,
+        message_skeleton=_normalize_text(" | ".join([message] + tail[1:])),
+        top_frames=[],
+        test_nodeids=[],
     )
 
 
@@ -226,12 +317,8 @@ def _tail_fallback(lines: list[str], n: int = 5) -> FailureSignature:
 def extract_signature(raw_log: str) -> FailureSignature:
     lines = _strip_lines(raw_log)
 
-    sig = _extract_pytest_summary(lines)
-    if sig is not None:
-        return sig
-
-    sig = _extract_traceback_block(lines)
-    if sig is not None:
-        return sig
-
+    for extractor in (_extract_pytest_summary, _extract_unittest, _extract_traceback_block, _extract_error_lines):
+        sig = extractor(lines)
+        if sig is not None:
+            return sig
     return _tail_fallback(lines)

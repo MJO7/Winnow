@@ -101,11 +101,18 @@ def detect_autoretry_workflows(conn: psycopg.Connection, repo_id: int) -> set[in
     return flagged
 
 
-def _mark_non_qualifying_runs(conn: psycopg.Connection, repo_id: int, default_branch: str) -> list[int]:
-    """Records the PR/non-default-branch exclusion (spec case 2) and
-    returns the run_ids that DO qualify for the labeled corpus. PR runs
-    are still ingested -- they feed the retrieval corpus in Phase 2/3 --
-    they just never enter `labels`.
+def _mark_non_qualifying_runs(conn: psycopg.Connection, repo_id: int, default_branch: str) -> tuple[list[int], set[int]]:
+    """Returns (runs eligible for the attempt join, subset eligible for
+    forward resolution).
+
+    The attempt join (flake rule) applies to ANY event: GitHub documents
+    that a re-run "uses the same GITHUB_SHA and GITHUB_REF of the original
+    event", so attempts of one run_id test identical content even on a
+    pull_request run. Forward resolution (real rule) compares DIFFERENT
+    runs, and there a PR head SHA does not pin the tested merge content,
+    so it is restricted to push-to-default-branch (spec case 2). The
+    first version of this restricted both and found 0 flakes in 84k jobs
+    -- 11 of the 12 fail->pass re-runs in that corpus were on PRs.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -118,22 +125,19 @@ def _mark_non_qualifying_runs(conn: psycopg.Connection, repo_id: int, default_br
         )
         rows = cur.fetchall()
 
-    qualifying: list[int] = []
+    attempt_scope: list[int] = []
+    forward_scope: set[int] = set()
     for run_id, event, head_branch, status, conclusion in rows:
-        if event != "push" or head_branch != default_branch:
-            record_exclusion(
-                conn, repo_id, "run", run_id, Rule.NON_PUSH_OR_NON_DEFAULT_BRANCH,
-                detail=f"event={event} head_branch={head_branch}",
-            )
-            continue
         if status != "completed":
             record_exclusion(conn, repo_id, "run", run_id, Rule.RUN_NOT_COMPLETED, detail=f"status={status}")
             continue
         if conclusion == "cancelled":
             record_exclusion(conn, repo_id, "run", run_id, Rule.RUN_CANCELLED_SUPERSEDED)
             continue
-        qualifying.append(run_id)
-    return qualifying
+        attempt_scope.append(run_id)
+        if event == "push" and head_branch == default_branch:
+            forward_scope.add(run_id)
+    return attempt_scope, forward_scope
 
 
 def _is_infra_by_steps(conn: psycopg.Connection, job_id: int) -> bool:
@@ -232,7 +236,7 @@ def label_repo(
 ) -> LabelSummary:
     _clear_prior_results(conn, repo_id)
     autoretry_workflows = detect_autoretry_workflows(conn, repo_id)
-    qualifying_run_ids = _mark_non_qualifying_runs(conn, repo_id, spec.default_branch)
+    qualifying_run_ids, forward_scope = _mark_non_qualifying_runs(conn, repo_id, spec.default_branch)
     conn.commit()
 
     if not qualifying_run_ids:
@@ -286,6 +290,10 @@ def label_repo(
         if _is_infra_by_steps(conn, last_job_id):
             _insert_label(conn, last_job_id, run_id, repo_id, "infra", "infra_setup_step_failed")
             summary.infra += 1
+            continue
+
+        if run_id not in forward_scope:
+            record_exclusion(conn, repo_id, "job", last_job_id, Rule.NON_PUSH_OR_NON_DEFAULT_BRANCH)
             continue
 
         resolution, saw_diverged = _resolve_forward(conn, client, spec, repo_id, workflow_id, name, run_id)

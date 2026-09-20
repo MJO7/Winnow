@@ -2,11 +2,11 @@
 """Phase 0 ingest CLI.
 
 Usage:
-    python scripts/ingest_repo.py --repo pytorch/pytorch --target-runs 500
-    python scripts/ingest_repo.py --repo pytorch/pytorch --target-runs 500 --fetch-logs --log-limit 200
+    python scripts/ingest_repo.py --repo pytorch/pytorch --days 30 --per-day 15
+    python scripts/ingest_repo.py --repo pytorch/pytorch --days 30 --per-day 15 --fetch-logs
 
 Steps, each idempotent and resumable:
-  1. discover runs (per event type, up to --target-runs each)
+  1. discover runs (up to --per-day per event type for each of the last --days days)
   2. fetch jobs + steps for any run that doesn't have them yet
   3. optionally fetch logs for failed jobs only (requires GITHUB_TOKEN)
 """
@@ -31,7 +31,8 @@ logger = logging.getLogger("ingest_repo")
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", required=True, help="owner/name, must be in winnow.repos.CORPUS")
-    ap.add_argument("--target-runs", type=int, default=500, help="runs to discover per event type")
+    ap.add_argument("--days", type=int, default=30, help="how many days back to sample")
+    ap.add_argument("--per-day", type=int, default=15, help="runs to discover per event type per day")
     ap.add_argument("--events", default="push,pull_request")
     ap.add_argument("--fetch-logs", action="store_true", help="also download logs for failed jobs")
     ap.add_argument("--log-limit", type=int, default=None, help="cap on failed-job logs fetched this run")
@@ -45,7 +46,7 @@ def main() -> None:
         logger.warning(
             "GITHUB_TOKEN not set: rate limit is 60 req/hr (vs 5000 authenticated), "
             "and job log downloads will be skipped entirely. Metadata-only ingest "
-            "at this scale will be slow and may not finish --target-runs before "
+            "at this scale will be slow and may not finish before "
             "the hour resets."
         )
 
@@ -56,7 +57,7 @@ def main() -> None:
         )
 
         events = tuple(e.strip() for e in args.events.split(",") if e.strip())
-        n_runs = discover_runs(client, conn, spec.owner, spec.name, repo_id, args.target_runs, events)
+        n_runs = discover_runs(client, conn, spec.owner, spec.name, repo_id, args.per_day, args.days, events)
         logger.info("discovered/updated %d run records", n_runs)
 
         n_jobs = fetch_jobs_for_ingested_runs(client, conn, spec.owner, spec.name, repo_id)

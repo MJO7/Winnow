@@ -115,17 +115,28 @@ def test_infra_setup_step_failure_labeled_infra_not_real(conn, repo_id):
     assert client.calls == []  # never even attempted forward resolution
 
 
-def test_pull_request_event_excluded_not_labeled(conn, repo_id):
+def test_pull_request_unresolved_failure_excluded_not_labeled_real(conn, repo_id):
     insert_run(conn, repo_id, run_id=1, event="pull_request", head_branch="feature-x")
     insert_job(conn, repo_id, job_id=101, run_id=1, run_attempt=1, conclusion="failure")
 
+    client = FakeGitHubClient()
+    label_repo(client, conn, repo_id, SPEC)
+
+    assert 101 not in _labels(conn)
+    assert client.calls == []  # forward resolution never attempted on a PR run
+    assert "non_push_or_non_default_branch" in _exclusion_rules_for_job(conn, 101)
+
+
+def test_pull_request_rerun_that_passes_is_a_flake(conn, repo_id):
+    # GitHub re-runs reuse the original GITHUB_SHA, so same-run attempts on
+    # a PR are SHA-stable evidence even though cross-run PR SHAs are not.
+    insert_run(conn, repo_id, run_id=1, event="pull_request", head_branch="feature-x")
+    insert_job(conn, repo_id, job_id=101, run_id=1, run_attempt=1, conclusion="failure")
+    insert_job(conn, repo_id, job_id=102, run_id=1, run_attempt=2, conclusion="success")
+
     label_repo(FakeGitHubClient(), conn, repo_id, SPEC)
 
-    labels = _labels(conn)
-    assert 101 not in labels
-    with conn.cursor() as cur:
-        cur.execute("SELECT rule FROM exclusions WHERE scope = 'run' AND scope_id = '1'")
-        assert cur.fetchone()[0] == "non_push_or_non_default_branch"
+    assert _labels(conn)[101][0] == "flake"
 
 
 def test_non_default_branch_push_excluded(conn, repo_id):

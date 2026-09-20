@@ -17,3 +17,10 @@ data/
 pgdata/
 
 .DS_Store
+build/
+infra/.terraform/
+infra/**/*.tfstate*
+infra/**/*.tfvars
+.terraform/
+*.tfstate
+*.tfstate.*

@@ -18,9 +18,10 @@ from winnow.retry_scan import summarize as summarize_retry
 
 RULE_EXPLANATIONS = {
     Rule.NON_PUSH_OR_NON_DEFAULT_BRANCH: (
-        "Run is a pull_request/schedule/etc. event, or a push to a non-default branch. "
-        "PR head SHAs don't pin the tested content (the checkout is a merge with a moving base), "
-        "so 'same SHA re-ran and passed' is not a valid flake signal. Still ingested for retrieval."
+        "Job's last attempt failed on a pull_request/schedule run or a non-default branch, so it "
+        "cannot be forward-resolved to 'real': across different runs a PR head SHA does not pin the "
+        "tested merge content. (Same-run re-runs on these events DO count for the flake rule: GitHub "
+        "re-runs use the original GITHUB_SHA.)"
     ),
     Rule.RUN_NOT_COMPLETED: "Run still queued/in progress at ingest time; outcome not yet knowable.",
     Rule.RUN_CANCELLED_SUPERSEDED: (

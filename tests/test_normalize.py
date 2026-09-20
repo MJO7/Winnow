@@ -136,3 +136,46 @@ def test_failure_key_and_retrieval_text_separate_identity_from_query():
 def test_tail_fallback_has_no_failure_key():
     sig = extract_signature(ts("Error: Process completed with exit code 1."))
     assert sig.failure_key is None
+
+
+def test_pytest_summary_without_message_takes_first_E_line():
+    log = "\n".join([
+        ts("____________________ test_pyarrow_string_fast_path ____________________"),
+        ts(">       assert result.dtype == expected"),
+        ts("E       AssertionError: assert dtype('O') == 'string[pyarrow]'"),
+        ts("FAILED pandas/tests/io/parser/test_c_parser_only.py::test_pyarrow_string_fast_path[True-kwargs0]"),
+    ])
+    sig = extract_signature(log)
+    assert sig.signature_source == "pytest_failed_summary"
+    assert sig.exception_type == "AssertionError"
+    assert sig.failure_key == "test:pandas/tests/io/parser/test_c_parser_only.py::test_pyarrow_string_fast_path"
+
+
+def test_unittest_result_header_cpython_style():
+    log = "\n".join([
+        ts("======================================================================"),
+        ts("ERROR: test_shutdown_ssl (test.test_asyncio.test_sslproto.SelectorStartTLSTests.test_shutdown_ssl)"),
+        ts("----------------------------------------------------------------------"),
+        ts("Traceback (most recent call last):"),
+        ts('  File "/home/runner/work/cpython/cpython/Lib/test/test_asyncio/test_sslproto.py", line 300, in test_shutdown_ssl'),
+        ts("    self.loop.run_until_complete(client())"),
+        ts("ConnectionResetError: [Errno 104] Connection reset by peer"),
+        ts("FAILED (errors=1)"),
+    ])
+    sig = extract_signature(log)
+    assert sig.signature_source == "unittest_result"
+    assert sig.test_nodeids == ["test.test_asyncio.test_sslproto.SelectorStartTLSTests::test_shutdown_ssl"]
+    assert sig.exception_type == "ConnectionResetError"
+    assert sig.top_frames[0].function == "test_shutdown_ssl"
+
+
+def test_error_annotations_beat_generic_tail():
+    log = "\n".join([
+        ts("Compiling torch_tpu/eager/amp_policies.cc"),
+        ts("torch_tpu/eager/amp_policies.cc:122:10: fatal error: 'ATen/ops/qr_ops.h' file not found"),
+        ts("1 error generated."),
+        ts("##[error]Process completed with exit code 1."),
+    ])
+    sig = extract_signature(log)
+    assert sig.signature_source == "error_lines"
+    assert "qr_ops.h" in sig.message_skeleton

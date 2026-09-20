@@ -1,0 +1,6 @@
+# cp terraform.tfvars.example terraform.tfvars  (tfvars is gitignored)
+alert_email = "you@example.com"
+admin_cidr  = "203.0.113.7/32"   # curl -s https://checkip.amazonaws.com
+region      = "us-east-1"
+# discover_schedule_enabled = true
+# triage_model = "claude-haiku-4-5"   # set from docs/adr/0005 once the frontier is in
