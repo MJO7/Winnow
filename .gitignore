@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# local data / secrets
+.env
+data/
+*.log
+*.log.gz
+
+# postgres volume
+pgdata/
+
+.DS_Store
